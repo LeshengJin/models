@@ -22,9 +22,12 @@ from official.modeling import tf_utils
 from official.modeling.hyperparams import base_config
 from official.nlp.configs import encoders
 from official.projects.longformer.longformer_encoder import LongformerEncoder
+from typing import List
 
-class RoformerEncoderConfig(encoders.BertEncoderConfig):
+@dataclasses.dataclass
+class LongformerEncoderConfig(encoders.BertEncoderConfig):
   attention_window: int = 128
+  use_gradient_checkpointing: bool = False
 
 
 @gin.configurable
@@ -39,7 +42,7 @@ def get_encoder(encoder_cfg: LongformerEncoderConfig):
     A encoder object.
   """
   return LongformerEncoder(
-      attention_window=attention_window,
+      attention_window=encoder_cfg.attention_window,
       vocab_size=encoder_cfg.vocab_size,
       hidden_size=encoder_cfg.hidden_size,
       num_layers=encoder_cfg.num_layers,

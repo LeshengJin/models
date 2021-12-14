@@ -117,6 +117,8 @@ class LongformerEncoder(tf.keras.Model):
       embedding_layer=None,
       norm_first=False,
       **kwargs):
+    # temporary hack to pass in a list
+    attention_window = [attention_window] * num_layers
     activation = tf.keras.activations.get(inner_activation)
     initializer = tf.keras.initializers.get(initializer)
 
@@ -299,7 +301,7 @@ class LongformerEncoder(tf.keras.Model):
       # if no `attention_mask` is given
       attention_mask = global_attention_mask + 1
 
-      return attention_mask
+    return attention_mask
 
   def get_embedding_table(self):
     return self._embedding_layer.embeddings

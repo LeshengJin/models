@@ -7,8 +7,8 @@ task:
       any:
         attention_window: 32
         use_gradient_checkpointing: false
-    init_checkpoint: 'TODO'
-    metric_type: 'accuracy'
+  init_checkpoint: 'TODO'
+  metric_type: 'accuracy'
   train_data:
     drop_remainder: true
     global_batch_size: 32

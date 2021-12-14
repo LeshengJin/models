@@ -81,7 +81,7 @@ def longformer_glue() -> cfg.ExperimentConfig:
       task=sentence_prediction.SentencePredictionConfig(
           model=sentence_prediction.ModelConfig(
               encoder=encoders.EncoderConfig(
-                  type="any", any=RoformerEncoderConfig())),
+                  type="any", any=LongformerEncoderConfig())),
           train_data=sentence_prediction_dataloader
           .SentencePredictionDataConfig(),
           validation_data=sentence_prediction_dataloader
