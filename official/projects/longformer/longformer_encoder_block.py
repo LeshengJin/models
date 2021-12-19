@@ -308,8 +308,6 @@ class LongformerEncoderBlock(tf.keras.layers.Layer):
         is_index_masked = is_index_masked[:, 0:self._output_range]
       if is_index_global_attn is not None:
         is_index_global_attn = is_index_global_attn[:, 0:self._output_range]
-      if is_global_attn is not None:
-        is_global_attn = is_global_attn[:, 0:self._output_range]
     else:
       if self._norm_first:
         source_tensor = input_tensor
