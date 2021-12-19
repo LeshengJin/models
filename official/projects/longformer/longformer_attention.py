@@ -147,7 +147,7 @@ class LongformerAttention(tf.keras.layers.MultiHeadAttention):
                **kwargs):
     super().__init__(**kwargs)
     self._layer_id = layer_id
-    _attention_window = attention_window[self._layer_id]
+    _attention_window = attention_window
     assert (
             _attention_window % 2 == 0
     ), f"`attention_window` for layer {self._layer_id} has to be an even value. Given {attention_window}"
@@ -252,9 +252,7 @@ class LongformerAttention(tf.keras.layers.MultiHeadAttention):
       self._output_dense = tf.keras.layers.Dense(
           units=self._num_heads * self._key_dim, name="dense",
           **common_kwargs
-        )  # FIXME
-      self._output_LayerNorm = tf.keras.layers.LayerNormalization(epsilon=1e-12, name="LayerNorm")  #FIXME epsilon
-      self._output_dropout = core.Dropout(rate=0.1)  #FIXME rate
+        )
 
   def call(self,
            hidden_states,
@@ -297,7 +295,6 @@ class LongformerAttention(tf.keras.layers.MultiHeadAttention):
     # Note: Applying scalar multiply at the smaller end of einsum improves
     # XLA performance, but may introduce slight numeric differences in
     # the Transformer attention head.
-    print(query.shape)
     query = tf.multiply(query, 1.0 / math.sqrt(float(self._key_dim))) # (B, T, N, key_dim)
     batch_size, seq_len, num_heads, head_dim = shape_list(query)
 
@@ -323,7 +320,7 @@ class LongformerAttention(tf.keras.layers.MultiHeadAttention):
         message=f"attn_probs should be of size ({batch_size}, {seq_len}, {num_heads}, {self._one_sided_attn_window_size * 2 + 1}), but is of size {shape_list(attn_scores)}",
       )
 
-      # compute global attn indices required through out forward fn
+    # compute global attn indices required through out forward fn
     (
       max_num_global_attn_indices,
       is_index_global_attn_nonzero,
@@ -368,6 +365,8 @@ class LongformerAttention(tf.keras.layers.MultiHeadAttention):
       attn_probs,
     )
 
+    if layer_head_mask == 0:
+      layer_head_mask = None
     if layer_head_mask is not None:
       if tf.executing_eagerly():
         tf.debugging.assert_equal(
@@ -445,7 +444,7 @@ class LongformerAttention(tf.keras.layers.MultiHeadAttention):
       attn_probs,
     )
 
-    attention_output = (attn_output, attn_probs, global_attn_probs)
+    attention_output = attn_output # (attn_output, attn_probs, global_attn_probs)
 
     return attention_output
 
@@ -1008,8 +1007,6 @@ class LongformerAttention(tf.keras.layers.MultiHeadAttention):
     )
 
     attn_output = self._output_dense(attn_output)
-    attn_output = self._output_dropout(attn_output, training=training)
-    attn_output = self._output_LayerNorm(attn_output + hidden_states)
 
     return attn_output, global_attn_probs
 

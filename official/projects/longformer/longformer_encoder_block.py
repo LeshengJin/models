@@ -17,8 +17,8 @@
 import tensorflow as tf
 from official.projects.longformer.longformer_attention import LongformerAttention
 
-
-@tf.keras.utils.register_keras_serializable(package="keras_nlp")
+# Transferred from TFLongformerLayer
+@tf.keras.utils.register_keras_serializable(package="Text")
 class LongformerEncoderBlock(tf.keras.layers.Layer):
   """TransformerEncoderBlock layer.
 
@@ -37,8 +37,9 @@ class LongformerEncoderBlock(tf.keras.layers.Layer):
                num_attention_heads,
                inner_dim,
                inner_activation,
+               # Longformer
                attention_window,
-               layer_id,
+               layer_id=0,
                output_range=None,
                kernel_initializer="glorot_uniform",
                bias_initializer="zeros",
@@ -96,6 +97,7 @@ class LongformerEncoderBlock(tf.keras.layers.Layer):
     self._num_heads = num_attention_heads
     self._inner_dim = inner_dim
     self._inner_activation = inner_activation
+    # Longformer
     self._attention_window = attention_window
     self._layer_id = layer_id
     self._attention_dropout = attention_dropout
@@ -146,9 +148,11 @@ class LongformerEncoderBlock(tf.keras.layers.Layer):
         activity_regularizer=self._activity_regularizer,
         kernel_constraint=self._kernel_constraint,
         bias_constraint=self._bias_constraint)
+    # TFLongformerSelfAttention + TFLongformerSelfOutput.dense
     self._attention_layer = LongformerAttention(
-        attention_window=self._attention_window,
+        # Longformer
         layer_id=self._layer_id,
+        attention_window=self._attention_window,
         num_heads=self._num_heads,
         key_dim=self._attention_head_size,
         dropout=self._attention_dropout,
@@ -157,15 +161,19 @@ class LongformerEncoderBlock(tf.keras.layers.Layer):
         attention_axes=self._attention_axes,
         name="self_attention",
         **common_kwargs)
+    # TFLongformerSelfOutput.dropout
     self._attention_dropout = tf.keras.layers.Dropout(rate=self._output_dropout)
     # Use float32 in layernorm for numeric stability.
     # It is probably safe in mixed_float16, but we haven't validated this yet.
+    # TFLongformerSelfOutput.Layernorm
     self._attention_layer_norm = (
         tf.keras.layers.LayerNormalization(
             name="self_attention_layer_norm",
             axis=-1,
             epsilon=self._norm_epsilon,
             dtype=tf.float32))
+    # TFLongformerIntermediate
+    # TFLongformerIntermediate.dense
     self._intermediate_dense = tf.keras.layers.experimental.EinsumDense(
         einsum_equation,
         output_shape=(None, self._inner_dim),
@@ -179,10 +187,14 @@ class LongformerEncoderBlock(tf.keras.layers.Layer):
       # as well, so we use float32.
       # TODO(b/154538392): Investigate this.
       policy = tf.float32
+    # TFLongformerIntermediate.intermediate_act_fn
     self._intermediate_activation_layer = tf.keras.layers.Activation(
         self._inner_activation, dtype=policy)
+    # ???
     self._inner_dropout_layer = tf.keras.layers.Dropout(
         rate=self._inner_dropout)
+    # TFLongformerOutput
+    # TFLongformerOutput.dense
     self._output_dense = tf.keras.layers.experimental.EinsumDense(
         einsum_equation,
         output_shape=(None, hidden_size),
@@ -190,8 +202,10 @@ class LongformerEncoderBlock(tf.keras.layers.Layer):
         name="output",
         kernel_initializer=self._kernel_initializer,
         **common_kwargs)
+    # TFLongformerOutput.dropout
     self._output_dropout = tf.keras.layers.Dropout(rate=self._output_dropout)
     # Use float32 in layernorm for numeric stability.
+    # TFLongformerOutput.layernorm
     self._output_layer_norm = tf.keras.layers.LayerNormalization(
         name="output_layer_norm",
         axis=-1,
@@ -258,43 +272,67 @@ class LongformerEncoderBlock(tf.keras.layers.Layer):
     Returns:
       An output tensor with the same dimensions as input/query tensor.
     """
-    (
-        input_tensor,
-        attention_mask,
-        layer_head_mask,
-        is_index_masked,
-        is_index_global_attn,
-        is_global_attn,
-    ) = inputs
+    if isinstance(inputs, (list, tuple)):
+      if len(inputs) == 6:
+        (
+          input_tensor,
+          attention_mask,
+          layer_head_mask,
+          is_index_masked,
+          is_index_global_attn,
+          is_global_attn
+        ) = inputs
+        key_value = None
+      elif len(inputs) == 7:
+        assert False  # No key_value
+      else:
+        raise ValueError("Unexpected inputs to %s with length at %d" %
+                         (self.__class__, len(inputs)))
+    else:
+      input_tensor = inputs
+      attention_mask = None
+      layer_head_mask = None
+      is_index_masked = None
+      is_index_global_attn = None
+      is_global_attn = None
+      key_value = None
 
     if self._output_range:
-      raise NotImplementedError("Out_range is not supported now.")
-      # if self._norm_first:
-      #   source_tensor = input_tensor[:, 0:self._output_range, :]
-      #   input_tensor = self._attention_layer_norm(input_tensor)
-      #   if key_value is not None:
-      #     key_value = self._attention_layer_norm(key_value)
-      # target_tensor = input_tensor[:, 0:self._output_range, :]
-      # if attention_mask is not None:
-      #   attention_mask = attention_mask[:, 0:self._output_range, :]
+      if self._norm_first:
+        source_tensor = input_tensor[:, 0:self._output_range, :]
+        input_tensor = self._attention_layer_norm(input_tensor)
+        if key_value is not None:
+          key_value = self._attention_layer_norm(key_value)
+      target_tensor = input_tensor[:, 0:self._output_range, :]
+      if attention_mask is not None:
+        attention_mask = attention_mask[:, 0:self._output_range, :]
+      if is_index_masked is not None:
+        is_index_masked = is_index_masked[:, 0:self._output_range]
+      if is_index_global_attn is not None:
+        is_index_global_attn = is_index_global_attn[:, 0:self._output_range]
+      if is_global_attn is not None:
+        is_global_attn = is_global_attn[:, 0:self._output_range]
     else:
       if self._norm_first:
         source_tensor = input_tensor
         input_tensor = self._attention_layer_norm(input_tensor)
-        # if key_value is not None:
-        #   key_value = self._attention_layer_norm(key_value)
+        if key_value is not None:
+          key_value = self._attention_layer_norm(key_value)
       target_tensor = input_tensor
 
-    # if key_value is None:
-    #   key_value = input_tensor
+    if key_value is None:
+      key_value = input_tensor
+    # attention_output = self._attention_layer(
+    #     query=target_tensor, value=key_value, attention_mask=attention_mask)
     attention_output = self._attention_layer(
-        hidden_states=input_tensor,
+        hidden_states=target_tensor,
         attention_mask=attention_mask,
         layer_head_mask=layer_head_mask,
         is_index_masked=is_index_masked,
         is_index_global_attn=is_index_global_attn,
         is_global_attn=is_global_attn,
     )
+    # TFLongformerAttention.TFLongformerSelfOutput.* - {.dense}
     attention_output = self._attention_dropout(attention_output)
     if self._norm_first:
       attention_output = source_tensor + attention_output
@@ -304,9 +342,11 @@ class LongformerEncoderBlock(tf.keras.layers.Layer):
     if self._norm_first:
       source_attention_output = attention_output
       attention_output = self._output_layer_norm(attention_output)
+    # TFLongformerIntermediate
     inner_output = self._intermediate_dense(attention_output)
     inner_output = self._intermediate_activation_layer(inner_output)
     inner_output = self._inner_dropout_layer(inner_output)
+    # TFLongformerOutput
     layer_output = self._output_dense(inner_output)
     layer_output = self._output_dropout(layer_output)
 

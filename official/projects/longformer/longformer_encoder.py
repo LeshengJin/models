@@ -12,42 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Bert encoder network."""
+"""Transformer-based BERT encoder network."""
 # pylint: disable=g-classes-have-attributes
 
-import collections
+from typing import Any, Callable, Optional, Union, List
 from absl import logging
 import tensorflow as tf
 
-from official.nlp.modeling.layers import on_device_embedding
-from official.nlp.modeling.layers import position_embedding
-from official.nlp.modeling.layers import self_attention_mask
+from official.nlp.modeling import layers
 from official.projects.longformer.longformer_encoder_block import LongformerEncoderBlock
-from typing import Dict, List, Optional, Union
 
 
-def shape_list(tensor: tf.Tensor) -> List[int]:
-  """
-  Deal with dynamic shape in tensorflow cleanly.
-
-  Args:
-      tensor (:obj:`tf.Tensor`): The tensor we want the shape of.
-
-  Returns:
-      :obj:`List[int]`: The shape of the tensor as a list.
-  """
-  dynamic = tf.shape(tensor)
-
-  if tensor.shape == tf.TensorShape(None):
-    return dynamic
-
-  static = tensor.shape.as_list()
-
-  return [dynamic[i] if s is None else s for i, s in enumerate(static)]
+_Initializer = Union[str, tf.keras.initializers.Initializer]
+_approx_gelu = lambda x: tf.keras.activations.gelu(x, approximate=True)
 
 
-@tf.keras.utils.register_keras_serializable(package='keras_nlp')
-class LongformerEncoder(tf.keras.Model):
+#  Transferred from huggingface.longformer.TFLongformerMainLayer & TFLongformerEncoder
+class LongformerEncoder(tf.keras.layers.Layer):
   """Bi-directional Transformer-based encoder network.
 
   This network implements a bi-directional Transformer-based encoder as
@@ -60,9 +41,6 @@ class LongformerEncoder(tf.keras.Model):
   in "BERT: Pre-training of Deep Bidirectional Transformers for Language
   Understanding".
 
-  *Note* that the network is constructed by
-  [Keras Functional API](https://keras.io/guides/functional_api/).
-
   Args:
     vocab_size: The size of the token vocabulary.
     hidden_size: The size of the transformer hidden layers.
@@ -74,13 +52,13 @@ class LongformerEncoder(tf.keras.Model):
       This determines the variable shape for positional embeddings.
     type_vocab_size: The number of types that the 'type_ids' input can take.
     inner_dim: The output dimension of the first Dense layer in a two-layer
-        feedforward network for each transformer.
+      feedforward network for each transformer.
     inner_activation: The activation for the first Dense layer in a two-layer
-        feedforward network for each transformer.
+      feedforward network for each transformer.
     output_dropout: Dropout probability for the post-attention and output
-        dropout.
-    attention_dropout: The dropout rate to use for the attention layers
-      within the transformer layers.
+      dropout.
+    attention_dropout: The dropout rate to use for the attention layers within
+      the transformer layers.
     initializer: The initialzer to use for all weights in this encoder.
     output_range: The sequence output range, [0, output_range), by slicing the
       target sequence of the last transformer layer. `None` means the entire
@@ -91,171 +69,123 @@ class LongformerEncoder(tf.keras.Model):
       matrices in the shape of ['vocab_size', 'embedding_width'] and
       ['embedding_width', 'hidden_size'] ('embedding_width' is usually much
       smaller than 'hidden_size').
-    embedding_layer: An optional Layer instance which will be called to
-     generate embeddings for the input word IDs.
-    norm_first: Whether to normalize inputs to attention and intermediate
-      dense layers. If set False, output of attention and intermediate dense
-      layers is normalized.
+    embedding_layer: An optional Layer instance which will be called to generate
+      embeddings for the input word IDs.
+    norm_first: Whether to normalize inputs to attention and intermediate dense
+      layers. If set False, output of attention and intermediate dense layers is
+      normalized.
   """
 
   def __init__(
       self,
-      vocab_size,
-      attention_window,
-      hidden_size=768,
-      num_layers=12,
-      num_attention_heads=12,
-      max_sequence_length=512,
-      type_vocab_size=16,
-      inner_dim=3072,
-      inner_activation=lambda x: tf.keras.activations.gelu(x, approximate=True),
-      output_dropout=0.1,
-      attention_dropout=0.1,
-      initializer=tf.keras.initializers.TruncatedNormal(stddev=0.02),
-      output_range=None,
-      embedding_width=None,
-      embedding_layer=None,
-      norm_first=False,
+      vocab_size: int,
+      attention_window: Union[List[int], int] = 512,
+      pad_token_id: int = 1,
+      hidden_size: int = 768,
+      num_layers: int = 12,
+      num_attention_heads: int = 12,
+      max_sequence_length: int = 512,
+      type_vocab_size: int = 16,
+      inner_dim: int = 3072,
+      inner_activation: Callable[..., Any] = _approx_gelu,
+      output_dropout: float = 0.1,
+      attention_dropout: float = 0.1,
+      initializer: _Initializer = tf.keras.initializers.TruncatedNormal(
+          stddev=0.02),
+      output_range: Optional[int] = None,
+      embedding_width: Optional[int] = None,
+      embedding_layer: Optional[tf.keras.layers.Layer] = None,
+      norm_first: bool = False,
       **kwargs):
-    # temporary hack to pass in a list
-    attention_window = [attention_window] * num_layers
+    # Pops kwargs that are used in V1 implementation.
+    if 'dict_outputs' in kwargs:
+      kwargs.pop('dict_outputs')
+    if 'return_all_encoder_outputs' in kwargs:
+      kwargs.pop('return_all_encoder_outputs')
+    if 'intermediate_size' in kwargs:
+      inner_dim = kwargs.pop('intermediate_size')
+    if 'activation' in kwargs:
+      inner_activation = kwargs.pop('activation')
+    if 'dropout_rate' in kwargs:
+      output_dropout = kwargs.pop('dropout_rate')
+    if 'attention_dropout_rate' in kwargs:
+      attention_dropout = kwargs.pop('attention_dropout_rate')
+    super().__init__(**kwargs)
+
+    # Longformer
+    self._attention_window = attention_window
+    self._pad_token_id = pad_token_id
+
     activation = tf.keras.activations.get(inner_activation)
     initializer = tf.keras.initializers.get(initializer)
-
-    word_ids = tf.keras.layers.Input(
-        shape=(None,), dtype=tf.int32, name='input_word_ids')
-    mask = tf.keras.layers.Input(
-        shape=(None,), dtype=tf.int32, name='input_mask')
-    type_ids = tf.keras.layers.Input(
-        shape=(None,), dtype=tf.int32, name='input_type_ids')
-    head_mask = tf.keras.layers.Input(
-        shape=(None,), dtype=tf.int32, name='head_mask')
-    global_attention_mask = tf.keras.layers.Input(
-        shape=(None,), dtype=tf.int32, name='global_attention_mask')
-
-    if mask is None:
-        mask = tf.fill(word_ids.shape, 1)
-
-    if global_attention_mask is not None:
-        mask = self._merge_to_attention_mask(
-            mask, global_attention_mask
-        )
-
-    # FIXME: pad to window size
-
-    # is index masked or global attention
-    is_index_masked = tf.math.less(mask, 1)
-    is_index_global_attn = tf.math.greater(mask, 1)
-    is_global_attn = tf.math.reduce_any(is_index_global_attn)
-    attention_mask_shape = shape_list(mask)
-    extended_attention_mask = tf.reshape(
-        mask, (attention_mask_shape[0], attention_mask_shape[1], 1, 1)
-    )
-    extended_attention_mask = tf.cast(tf.math.abs(1 - extended_attention_mask), tf.dtypes.float32) * -10000.0
 
     if embedding_width is None:
       embedding_width = hidden_size
 
     if embedding_layer is None:
-      embedding_layer_inst = on_device_embedding.OnDeviceEmbedding(
+      self._embedding_layer = layers.OnDeviceEmbedding(
           vocab_size=vocab_size,
           embedding_width=embedding_width,
           initializer=initializer,
           name='word_embeddings')
     else:
-      embedding_layer_inst = embedding_layer
-    word_embeddings = embedding_layer_inst(word_ids)
+      self._embedding_layer = embedding_layer
 
-    # Always uses dynamic slicing for simplicity.
-    position_embedding_layer = position_embedding.PositionEmbedding(
+    self._position_embedding_layer = layers.PositionEmbedding(
         initializer=initializer,
         max_length=max_sequence_length,
         name='position_embedding')
-    position_embeddings = position_embedding_layer(word_embeddings)
-    type_embedding_layer = on_device_embedding.OnDeviceEmbedding(
+
+    self._type_embedding_layer = layers.OnDeviceEmbedding(
         vocab_size=type_vocab_size,
         embedding_width=embedding_width,
         initializer=initializer,
         use_one_hot=True,
         name='type_embeddings')
-    type_embeddings = type_embedding_layer(type_ids)
 
-    embeddings = tf.keras.layers.Add()(
-        [word_embeddings, position_embeddings, type_embeddings])
-
-    embedding_norm_layer = tf.keras.layers.LayerNormalization(
+    self._embedding_norm_layer = tf.keras.layers.LayerNormalization(
         name='embeddings/layer_norm', axis=-1, epsilon=1e-12, dtype=tf.float32)
 
-    embeddings = embedding_norm_layer(embeddings)
-    embeddings = (tf.keras.layers.Dropout(rate=output_dropout)(embeddings))
+    self._embedding_dropout = tf.keras.layers.Dropout(
+        rate=output_dropout, name='embedding_dropout')
 
     # We project the 'embedding' output to 'hidden_size' if it is not already
     # 'hidden_size'.
+    self._embedding_projection = None
     if embedding_width != hidden_size:
-      embedding_projection = tf.keras.layers.experimental.EinsumDense(
+      self._embedding_projection = tf.keras.layers.experimental.EinsumDense(
           '...x,xy->...y',
           output_shape=hidden_size,
           bias_axes='y',
           kernel_initializer=initializer,
           name='embedding_projection')
-      embeddings = embedding_projection(embeddings)
-    else:
-      embedding_projection = None
 
-    transformer_layers = []
-    data = embeddings
-    attention_mask = self_attention_mask.SelfAttentionMask()(data, mask)
-    encoder_outputs = []
+    self._transformer_layers = []
+    self._attention_mask_layer = layers.SelfAttentionMask(
+        name='self_attention_mask')
     for i in range(num_layers):
-      if i == num_layers - 1 and output_range is not None:
-        transformer_output_range = output_range
-      else:
-        transformer_output_range = None
       layer = LongformerEncoderBlock(
           num_attention_heads=num_attention_heads,
           inner_dim=inner_dim,
           inner_activation=inner_activation,
-          attention_window=attention_window,
+          # Longformer, instead of passing a list of attention_window, pass a value to sub-block
+          attention_window=attention_window if isinstance(attention_window, int) else attention_window[i],
           layer_id=i,
           output_dropout=output_dropout,
           attention_dropout=attention_dropout,
           norm_first=norm_first,
-          output_range=transformer_output_range,
+          output_range=output_range if i == num_layers - 1 else None,
           kernel_initializer=initializer,
-          name='longformer/layer_%d' % i)
-      transformer_layers.append(layer)
-      longformer_input = (data, attention_mask, head_mask, is_index_masked, is_index_global_attn, is_global_attn)
-      data = layer(longformer_input)
-      encoder_outputs.append(data)
+          name='transformer/layer_%d' % i)
+      self._transformer_layers.append(layer)
 
-    last_encoder_output = encoder_outputs[-1]
-    # Applying a tf.slice op (through subscript notation) to a Keras tensor
-    # like this will create a SliceOpLambda layer. This is better than a Lambda
-    # layer with Python code, because that is fundamentally less portable.
-    first_token_tensor = last_encoder_output[:, 0, :]
-    pooler_layer = tf.keras.layers.Dense(
+    self._pooler_layer = tf.keras.layers.Dense(
         units=hidden_size,
         activation='tanh',
         kernel_initializer=initializer,
         name='pooler_transform')
-    cls_output = pooler_layer(first_token_tensor)
 
-    outputs = dict(
-        sequence_output=encoder_outputs[-1],
-        pooled_output=cls_output,
-        encoder_outputs=encoder_outputs,
-    )
-
-    # Once we've created the network using the Functional API, we call
-    # super().__init__ as though we were invoking the Functional API Model
-    # constructor, resulting in this object having all the properties of a model
-    # created using the Functional API. Once super().__init__ is called, we
-    # can assign attributes to `self` - note that all `self` assignments are
-    # below this line.
-    super(LongformerEncoder, self).__init__(
-        inputs=[word_ids, mask, type_ids], outputs=outputs, **kwargs)
-
-    config_dict = {
+    self._config = {
         'vocab_size': vocab_size,
         'hidden_size': hidden_size,
         'num_layers': num_layers,
@@ -271,37 +201,100 @@ class LongformerEncoder(tf.keras.Model):
         'embedding_width': embedding_width,
         'embedding_layer': embedding_layer,
         'norm_first': norm_first,
+        # Longformer
+        'attention_window': attention_window,
+        'pad_token_id': pad_token_id,
     }
+    self.inputs = dict(
+        input_word_ids=tf.keras.Input(shape=(None,), dtype=tf.int32),
+        input_mask=tf.keras.Input(shape=(None,), dtype=tf.int32),
+        input_type_ids=tf.keras.Input(shape=(None,), dtype=tf.int32))
 
-    # We are storing the config dict as a namedtuple here to ensure checkpoint
-    # compatibility with an earlier version of this model which did not track
-    # the config dict attribute. TF does not track immutable attrs which
-    # do not contain Trackables, so by creating a config namedtuple instead of
-    # a dict we avoid tracking it.
-    config_cls = collections.namedtuple('Config', config_dict.keys())
-    self._config = config_cls(**config_dict)
-    self._pooler_layer = pooler_layer
-    self._transformer_layers = transformer_layers
-    self._embedding_norm_layer = embedding_norm_layer
-    self._embedding_layer = embedding_layer_inst
-    self._position_embedding_layer = position_embedding_layer
-    self._type_embedding_layer = type_embedding_layer
-    if embedding_projection is not None:
-      self._embedding_projection = embedding_projection
-
-  @staticmethod
-  def _merge_to_attention_mask(attention_mask: tf.Tensor, global_attention_mask: tf.Tensor):
-    # longformer self attention expects attention mask to have 0 (no attn), 1 (local attn), 2 (global attn)
-    # (global_attention_mask + 1) => 1 for local attention, 2 for global attention
-    # => final attention_mask => 0 for no attention, 1 for local attention 2 for global attention
-    if attention_mask is not None:
-      attention_mask = attention_mask * (global_attention_mask + 1)
+  def call(self, inputs):
+    word_embeddings = None
+    if isinstance(inputs, dict):
+      word_ids = inputs.get('input_word_ids')  # input_ids
+      mask = inputs.get('input_mask')  # attention_mask
+      type_ids = inputs.get('input_type_ids')  # token_type_ids
+      word_embeddings = inputs.get('input_word_embeddings', None)  # input_embeds
+      # Longformer
+      head_mask = inputs.get('head_mask', None)
+      global_attention_mask=inputs.get('global_attention_mask', None)
     else:
-      # simply use `global_attention_mask` as `attention_mask`
-      # if no `attention_mask` is given
-      attention_mask = global_attention_mask + 1
+      raise ValueError('Unexpected inputs type to %s.' % self.__class__)
 
-    return attention_mask
+    # Longformer: merge `global_attention_mask` and `attention_mask`
+    if global_attention_mask is not None:
+      mask = self._merge_to_attention_mask(mask, global_attention_mask)
+
+    (
+        padding_len,
+        word_ids,
+        mask,
+        type_ids,
+        # position_ids,
+        word_embeddings,
+    ) = self._pad_to_window_size(
+        word_ids=word_ids,
+        mask=mask,
+        type_ids=type_ids,
+        # position_ids=position_ids,
+        word_embeddings=word_embeddings,
+        pad_token_id=self._pad_token_id
+    )
+
+    if word_embeddings is None:
+      word_embeddings = self._embedding_layer(word_ids)
+    # absolute position embeddings.
+    position_embeddings = self._position_embedding_layer(word_embeddings)
+    type_embeddings = self._type_embedding_layer(type_ids)
+
+    embeddings = word_embeddings + position_embeddings + type_embeddings
+    embeddings = self._embedding_norm_layer(embeddings)
+    embeddings = self._embedding_dropout(embeddings)
+
+    if self._embedding_projection is not None:
+      embeddings = self._embedding_projection(embeddings)
+
+    # Longformer: is index masked or global attention
+    is_index_masked = tf.math.less(mask, 1)
+    is_index_global_attn = tf.math.greater(mask, 1)
+    is_global_attn = tf.math.reduce_any(is_index_global_attn)
+
+    # We create a 3D attention mask from a 2D tensor mask.
+    # attention_mask = self._attention_mask_layer(embeddings, mask)
+
+    # Longformer
+    attention_mask = mask
+    attention_mask_shape = mask.shape
+    extended_attention_mask = tf.reshape(
+        attention_mask, (attention_mask_shape[0], attention_mask_shape[1], 1, 1)
+    )
+    attention_mask = tf.cast(tf.math.abs(1 - extended_attention_mask), tf.dtypes.float32) * -10000.0
+
+    encoder_outputs = []
+    x = embeddings
+    # TFLongformerEncoder
+    for i, layer in enumerate(self._transformer_layers):
+      x = layer([
+          x,
+          attention_mask,
+          head_mask[i] if head_mask is not None else 0,
+          is_index_masked,
+          is_index_global_attn,
+          is_global_attn])
+      encoder_outputs.append(x)
+
+    last_encoder_output = encoder_outputs[-1]
+    if padding_len > 0:
+        last_encoder_output = last_encoder_output[:, :-padding_len]
+    first_token_tensor = last_encoder_output[:, 0, :]
+    pooled_output = self._pooler_layer(first_token_tensor)
+
+    return dict(
+        sequence_output=last_encoder_output,
+        pooled_output=pooled_output,
+        encoder_outputs=encoder_outputs)
 
   def get_embedding_table(self):
     return self._embedding_layer.embeddings
@@ -310,7 +303,7 @@ class LongformerEncoder(tf.keras.Model):
     return self._embedding_layer
 
   def get_config(self):
-    return dict(self._config._asdict())
+    return dict(self._config)
 
   @property
   def transformer_layers(self):
@@ -334,3 +327,73 @@ class LongformerEncoder(tf.keras.Model):
       logging.warn(warn_string)
 
     return cls(**config)
+
+  @staticmethod
+  def _merge_to_attention_mask(attention_mask: tf.Tensor, global_attention_mask: tf.Tensor):
+    # longformer self attention expects attention mask to have 0 (no attn), 1 (local attn), 2 (global attn)
+    # (global_attention_mask + 1) => 1 for local attention, 2 for global attention
+    # => final attention_mask => 0 for no attention, 1 for local attention 2 for global attention
+    if attention_mask is not None:
+      attention_mask = attention_mask * (global_attention_mask + 1)
+    else:
+      # simply use `global_attention_mask` as `attention_mask`
+      # if no `attention_mask` is given
+      attention_mask = global_attention_mask + 1
+
+    return attention_mask
+
+  def _pad_to_window_size(
+      self,
+      word_ids,  # input_ids
+      mask,  # attention_mask
+      type_ids,  # token_type_ids
+      # position_ids,  # position_ids
+      word_embeddings,  # inputs_embeds
+      pad_token_id,  # pad_token_id
+  ):
+    """A helper function to pad tokens and mask to work with implementation of Longformer selfattention."""
+    # padding
+    attention_window = (
+        self._attention_window if isinstance(self._attention_window, int) else max(self._attention_window)
+    )
+
+    assert attention_window % 2 == 0, f"`attention_window` should be an even value. Given {attention_window}"
+
+    # input_shape = shape_list(input_ids) if input_ids is not None else shape_list(inputs_embeds)
+    input_shape = word_ids.shape if word_ids is not None else word_embeddings.shape
+    batch_size, seq_len = input_shape[:2]
+    padding_len = (attention_window - seq_len % attention_window) % attention_window
+
+    # if padding_len > 0:
+    #       logger.info(
+    #           f"Input ids are automatically padded from {seq_len} to {seq_len + padding_len} to be a multiple of "
+    #           f"`config.attention_window`: {attention_window}"
+    #       )
+
+    paddings = tf.convert_to_tensor([[0, 0], [0, padding_len]])
+
+    if word_ids is not None:
+      word_ids = tf.pad(word_ids, paddings, constant_values=pad_token_id)
+
+    # if position_ids is not None:
+    #   # pad with position_id = pad_token_id as in modeling_roberta.RobertaEmbeddings
+    #   position_ids = tf.pad(position_ids, paddings, constant_values=pad_token_id)
+
+    if word_embeddings is not None:
+      def pad_embeddings():
+        word_ids_padding = tf.fill((batch_size, padding_len), self.pad_token_id)
+        word_embeddings_padding = self._embedding_layer(word_ids_padding)
+        return tf.concat([word_embeddings, word_embeddings_padding], axis=-2)
+
+      word_embeddings = tf.cond(tf.math.greater(padding_len, 0), pad_embeddings, lambda: word_embeddings)
+
+    mask = tf.pad(mask, paddings, constant_values=False)  # no attention on the padding tokens
+    token_type_ids = tf.pad(type_ids, paddings, constant_values=0)  # pad with token_type_id = 0
+
+    return (
+        padding_len,
+        word_ids,
+        mask,
+        token_type_ids,
+        # position_ids,
+        word_embeddings,)
