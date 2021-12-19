@@ -257,7 +257,6 @@ class LongformerAttention(tf.keras.layers.MultiHeadAttention):
   def call(self,
            hidden_states,
            attention_mask=None,
-           layer_head_mask=None,
            is_index_masked=None,
            is_index_global_attn=None,
            is_global_attn=None,
@@ -365,8 +364,7 @@ class LongformerAttention(tf.keras.layers.MultiHeadAttention):
       attn_probs,
     )
 
-    if layer_head_mask == 0:
-      layer_head_mask = None
+    layer_head_mask = None
     if layer_head_mask is not None:
       if tf.executing_eagerly():
         tf.debugging.assert_equal(

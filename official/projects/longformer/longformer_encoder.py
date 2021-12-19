@@ -218,7 +218,6 @@ class LongformerEncoder(tf.keras.layers.Layer):
       type_ids = inputs.get('input_type_ids')  # token_type_ids
       word_embeddings = inputs.get('input_word_embeddings', None)  # input_embeds
       # Longformer
-      head_mask = inputs.get('head_mask', None)
       global_attention_mask=inputs.get('global_attention_mask', None)
     else:
       raise ValueError('Unexpected inputs type to %s.' % self.__class__)
@@ -279,7 +278,6 @@ class LongformerEncoder(tf.keras.layers.Layer):
       x = layer([
           x,
           attention_mask,
-          head_mask[i] if head_mask is not None else 0,
           is_index_masked,
           is_index_global_attn,
           is_global_attn])

@@ -273,17 +273,16 @@ class LongformerEncoderBlock(tf.keras.layers.Layer):
       An output tensor with the same dimensions as input/query tensor.
     """
     if isinstance(inputs, (list, tuple)):
-      if len(inputs) == 6:
+      if len(inputs) == 5:
         (
           input_tensor,
           attention_mask,
-          layer_head_mask,
           is_index_masked,
           is_index_global_attn,
           is_global_attn
         ) = inputs
         key_value = None
-      elif len(inputs) == 7:
+      elif len(inputs) == 6:
         assert False  # No key_value
       else:
         raise ValueError("Unexpected inputs to %s with length at %d" %
@@ -291,7 +290,6 @@ class LongformerEncoderBlock(tf.keras.layers.Layer):
     else:
       input_tensor = inputs
       attention_mask = None
-      layer_head_mask = None
       is_index_masked = None
       is_index_global_attn = None
       is_global_attn = None
@@ -327,7 +325,6 @@ class LongformerEncoderBlock(tf.keras.layers.Layer):
     attention_output = self._attention_layer(
         hidden_states=target_tensor,
         attention_mask=attention_mask,
-        layer_head_mask=layer_head_mask,
         is_index_masked=is_index_masked,
         is_index_global_attn=is_index_global_attn,
         is_global_attn=is_global_attn,
